@@ -20,6 +20,76 @@ import {
 import { ErrorHandlerContext, ErrorRecovery } from "../../error";
 import { RendererProps } from "../../app";
 
+// Utility function to convert RGB to HSV
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+	r /= 255;
+	g /= 255;
+	b /= 255;
+	
+	const max = Math.max(r, g, b);
+	const min = Math.min(r, g, b);
+	const diff = max - min;
+	
+	let h = 0;
+	if (diff !== 0) {
+		if (max === r) h = ((g - b) / diff) % 6;
+		else if (max === g) h = (b - r) / diff + 2;
+		else h = (r - g) / diff + 4;
+	}
+	h = h * 60;
+	if (h < 0) h += 360;
+	
+	const s = max === 0 ? 0 : diff / max;
+	const v = max;
+	
+	return [h / 360, s, v];
+}
+
+// Utility function to convert HSV to RGB
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+	h *= 360;
+	const c = v * s;
+	const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+	const m = v - c;
+	
+	let r = 0, g = 0, b = 0;
+	if (0 <= h && h < 60) [r, g, b] = [c, x, 0];
+	else if (60 <= h && h < 120) [r, g, b] = [x, c, 0];
+	else if (120 <= h && h < 180) [r, g, b] = [0, c, x];
+	else if (180 <= h && h < 240) [r, g, b] = [0, x, c];
+	else if (240 <= h && h < 300) [r, g, b] = [x, 0, c];
+	else if (300 <= h && h < 360) [r, g, b] = [c, 0, x];
+	
+	return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+}
+
+// Generate complementary and accent colors from base theme color
+function generateColorPalette(baseColor: Spicetify.Color): {
+	base: [number, number, number];
+	secondary: [number, number, number];
+	accent: [number, number, number];
+} {
+	const [h, s, v] = rgbToHsv(baseColor.rgb.r, baseColor.rgb.g, baseColor.rgb.b);
+	
+	// Create secondary color with hue shift and slightly different saturation
+	const secondaryHue = (h + 0.25) % 1; // 90 degree hue shift
+	const secondarySat = Math.min(1, s * 1.2); // Boost saturation
+	const secondaryVal = Math.min(1, v * 0.9); // Slightly darker
+	const secondary = hsvToRgb(secondaryHue, secondarySat, secondaryVal);
+	
+	// Create accent color with complementary hue
+	const accentHue = (h + 0.5) % 1; // 180 degree hue shift (complementary)
+	const accentSat = Math.min(1, s * 1.4); // More saturated
+	const accentVal = Math.min(1, v * 1.1); // Slightly brighter
+	const accent = hsvToRgb(accentHue, accentSat, accentVal);
+	
+	return {
+		base: [baseColor.rgb.r, baseColor.rgb.g, baseColor.rgb.b],
+		secondary,
+		accent
+	};
+}
+
 type CanvasData = {
 	themeColor: Spicetify.Color;
 	seed: number;
@@ -63,7 +133,13 @@ type RendererState =
 			uBlurDirectionLoc: WebGLUniformLocation;
 			uBlurInputTextureLoc: WebGLUniformLocation;
 
-			uOutputColorLoc: WebGLUniformLocation;
+			uBaseColorLoc: WebGLUniformLocation;
+			uSecondaryColorLoc: WebGLUniformLocation;
+			uAccentColorLoc: WebGLUniformLocation;
+			uTimeLoc: WebGLUniformLocation;
+			uAmplitudeFinalizeLoc: WebGLUniformLocation;
+			uColorCycleSpeedLoc: WebGLUniformLocation;
+			uColorMixIntensityLoc: WebGLUniformLocation;
 			uBlurredTextureLoc: WebGLUniformLocation;
 			uOriginalTextureLoc: WebGLUniformLocation;
 
@@ -229,7 +305,13 @@ export default function NCSVisualizer(props: RendererProps) {
 		if (!finalizeShader) return { isError: true };
 
 		const inPositionLocFinalize = gl.getAttribLocation(finalizeShader, "inPosition")!;
-		const uOutputColorLoc = gl.getUniformLocation(finalizeShader, "uOutputColor")!;
+		const uBaseColorLoc = gl.getUniformLocation(finalizeShader, "uBaseColor")!;
+		const uSecondaryColorLoc = gl.getUniformLocation(finalizeShader, "uSecondaryColor")!;
+		const uAccentColorLoc = gl.getUniformLocation(finalizeShader, "uAccentColor")!;
+		const uTimeLoc = gl.getUniformLocation(finalizeShader, "uTime")!;
+		const uAmplitudeFinalizeLoc = gl.getUniformLocation(finalizeShader, "uAmplitude")!;
+		const uColorCycleSpeedLoc = gl.getUniformLocation(finalizeShader, "uColorCycleSpeed")!;
+		const uColorMixIntensityLoc = gl.getUniformLocation(finalizeShader, "uColorMixIntensity")!;
 		const uBlurredTextureLoc = gl.getUniformLocation(finalizeShader, "uBlurredTexture")!;
 		const uOriginalTextureLoc = gl.getUniformLocation(finalizeShader, "uOriginalTexture")!;
 
@@ -284,7 +366,13 @@ export default function NCSVisualizer(props: RendererProps) {
 			uBlurDirectionLoc,
 			uBlurInputTextureLoc,
 
-			uOutputColorLoc,
+			uBaseColorLoc,
+			uSecondaryColorLoc,
+			uAccentColorLoc,
+			uTimeLoc,
+			uAmplitudeFinalizeLoc,
+			uColorCycleSpeedLoc,
+			uColorMixIntensityLoc,
 			uBlurredTextureLoc,
 			uOriginalTextureLoc,
 
@@ -330,10 +418,19 @@ export default function NCSVisualizer(props: RendererProps) {
 		const uDotRadiusPX = uDotRadius * 0.5 * state.viewportSize;
 		const uDotSpacing = 0.9;
 		const uDotOffset = -0.9 / 2;
-		const uSphereRadius = mapLinear(uAmplitude, 0, 1, 0.75 * 0.9, 0.9);
-		const uFeather = Math.pow(uAmplitude + 3, 2) * (45 / 1568);
-		const uNoiseFrequency = 4;
-		const uNoiseAmplitude = 0.32 * 0.9;
+		
+		// Enhanced sphere radius with more dynamic range and rhythmic pulsing
+		const baseSphereRadius = mapLinear(uAmplitude, 0, 1, 0.6 * 0.9, 1.1 * 0.9);
+		const rhythmicPulse = Math.sin(progress * 2.0) * uAmplitude * 0.1;
+		const uSphereRadius = baseSphereRadius + rhythmicPulse;
+		
+		// Enhanced feather with audio responsiveness
+		const baseFeather = Math.pow(uAmplitude + 3, 2) * (45 / 1568);
+		const uFeather = baseFeather * (1.0 + uAmplitude * 0.5);
+		
+		// Dynamic noise parameters that respond to audio
+		const uNoiseFrequency = 4 + uAmplitude * 2.0; // Higher frequency with louder music
+		const uNoiseAmplitude = (0.32 * 0.9) * (1.0 + uAmplitude * 0.7); // More noise with amplitude
 
 		if (state.particleTextureSize !== uDotCount) {
 			state.particleTextureSize = uDotCount;
@@ -420,14 +517,46 @@ export default function NCSVisualizer(props: RendererProps) {
 		gl.clearColor(0, 0, 0, 0);
 		gl.clear(gl.COLOR_BUFFER_BIT);
 
-		// combine blurred and original
+		// combine blurred and original with dynamic colors
 		gl.useProgram(state.finalizeShader);
+		
+		// Generate color palette from theme color
+		const colorPalette = generateColorPalette(data.themeColor);
+		
+		// Set dynamic color uniforms
 		gl.uniform3f(
-			state.uOutputColorLoc,
-			data.themeColor.rgb.r / 255,
-			data.themeColor.rgb.g / 255,
-			data.themeColor.rgb.b / 255
+			state.uBaseColorLoc,
+			colorPalette.base[0] / 255,
+			colorPalette.base[1] / 255,
+			colorPalette.base[2] / 255
 		);
+		gl.uniform3f(
+			state.uSecondaryColorLoc,
+			colorPalette.secondary[0] / 255,
+			colorPalette.secondary[1] / 255,
+			colorPalette.secondary[2] / 255
+		);
+		gl.uniform3f(
+			state.uAccentColorLoc,
+			colorPalette.accent[0] / 255,
+			colorPalette.accent[1] / 255,
+			colorPalette.accent[2] / 255
+		);
+		
+		// Set time and animation uniforms with audio responsiveness
+		gl.uniform1f(state.uTimeLoc, progress);
+		gl.uniform1f(state.uAmplitudeFinalizeLoc, uAmplitude);
+		
+		// Dynamic color cycling that responds to audio
+		const baseColorSpeed = 0.3; // Base cycling speed
+		const audioResponsiveSpeed = baseColorSpeed * (1.0 + uAmplitude * 1.5);
+		gl.uniform1f(state.uColorCycleSpeedLoc, audioResponsiveSpeed);
+		
+		// Dynamic color mixing intensity based on amplitude
+		const baseMixIntensity = 1.5;
+		const dynamicMixIntensity = baseMixIntensity * (1.0 + uAmplitude * 2.0);
+		gl.uniform1f(state.uColorMixIntensityLoc, dynamicMixIntensity);
+		
 		gl.uniform1i(state.uBlurredTextureLoc, 0);
 		gl.uniform1i(state.uOriginalTextureLoc, 1);
 
